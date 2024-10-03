@@ -1,5 +1,6 @@
 package com.hmdp.service.impl;
 
+import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.hmdp.dto.Result;
@@ -30,23 +31,73 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public Result queryById(Long id) {
+        //缓存穿透
+//        Shop shop = queryWithPassThrough(id);
+        //互斥锁解决缓存击穿
+        Shop shop = queryWithMutex(id);
+        if (shop == null) {
+            return Result.fail("店铺不存在");
+        }
+        return Result.ok(shop);
+    }
+
+    public  Shop queryWithPassThrough(Long id){
         String shopInfo = stringRedisTemplate.opsForValue().get("cache:shop:" + id);
         if(StrUtil.isNotBlank(shopInfo)){
-            Shop shop = JSONUtil.toBean(shopInfo, Shop.class);
-            return Result.ok(shop);
+            return JSONUtil.toBean(shopInfo, Shop.class);
         }
         if(shopInfo != null){
-            return Result.fail("店铺不存在");
+            return null;
         }
         Shop shop = getById(id);
         if(shop == null){
             stringRedisTemplate.opsForValue().set("cache:shop:" + id, "",2, TimeUnit.MINUTES);
-            return Result.fail("店铺不存在");
+            return null;
         }
         stringRedisTemplate.opsForValue().set("cache:shop:" + id, JSONUtil.toJsonStr(shop),30, TimeUnit.MINUTES);
-        return Result.ok(shop);
+        return shop;
     }
 
+    public  Shop queryWithMutex(Long id){
+        String shopInfo = stringRedisTemplate.opsForValue().get("cache:shop:" + id);
+        if(StrUtil.isNotBlank(shopInfo)){
+            return JSONUtil.toBean(shopInfo, Shop.class);
+        }
+        if(shopInfo != null){
+            return null;
+        }
+
+        String lockey = "lock:shop:"+id;
+        Shop shop = null;
+        try {
+            if(!tryLock(lockey)){
+                Thread.sleep(60);
+                return queryWithMutex(id);
+            }
+
+            shop = getById(id);
+            if(shop == null){
+                stringRedisTemplate.opsForValue().set("cache:shop:" + id, "",2, TimeUnit.MINUTES);
+                return null;
+            }
+            stringRedisTemplate.opsForValue().set("cache:shop:" + id, JSONUtil.toJsonStr(shop),30, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            unLock(lockey);
+        }
+        return shop;
+    }
+
+    private boolean tryLock(String key){
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    private void unLock(String key){
+        stringRedisTemplate.delete(key);
+
+    }
     @Override
     @Transactional
     public Result update(Shop shop) {
