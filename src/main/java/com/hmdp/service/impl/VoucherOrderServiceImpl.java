@@ -9,6 +9,7 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisWorker;
 import com.hmdp.utils.UserHolder;
+import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,7 +31,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Autowired
     private RedisWorker redisWorker;
     @Override
-    @Transactional
     public Result seckillVoucher(Long voucherId) {
         SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
         if(voucher.getBeginTime().isAfter(LocalDateTime.now())){
@@ -42,22 +42,39 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if(voucher.getStock() < 1){
             return Result.fail("库存不足");
         }
-        boolean success = seckillVoucherService.update()
-                .setSql("stock = stock - 1")
-                .eq("voucher_id", voucherId)
-                .update();
-        if (!success){
-            return Result.fail("库存不足");
+        Long userId = UserHolder.getUser().getId();
+        synchronized (userId.toString().intern()){
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+            return proxy.creatVoucherOrder(voucherId);
         }
 
-        VoucherOrder voucherOrder = new VoucherOrder();
-        long orderId = redisWorker.nextId("order");
-        voucherOrder.setId(orderId);
-        long userId = UserHolder.getUser().getId();
-        voucherOrder.setUserId(userId);
-        voucherOrder.setVoucherId(voucherId);
 
-        save(voucherOrder);
-        return Result.ok(orderId);
     }
+    @Transactional
+     public Result creatVoucherOrder(Long voucherId){
+         Long userId = UserHolder.getUser().getId();
+
+         int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+         if(count > 0){
+             return Result.fail("用户已经购买过一次");
+         }
+         boolean success = seckillVoucherService.update()
+                 .setSql("stock = stock - 1")
+                 .eq("voucher_id", voucherId)
+                 .gt("status", 0)
+                 .update();
+         if (!success){
+             return Result.fail("库存不足");
+         }
+
+         VoucherOrder voucherOrder = new VoucherOrder();
+         long orderId = redisWorker.nextId("order");
+         voucherOrder.setId(orderId);
+
+         voucherOrder.setUserId(userId);
+         voucherOrder.setVoucherId(voucherId);
+
+         save(voucherOrder);
+         return Result.ok(orderId);
+     }
 }
